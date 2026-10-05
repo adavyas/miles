@@ -31,6 +31,8 @@ def _args() -> ScriptArgs:
         load_from_hf=True,
         skip_saving=True,
         use_fault_tolerance=False,
+        optimizer_offload=True,
+        recompute="full",
         extra_args=("--ci-test " "--check-weight-update-allow-quant-error " "--num-rollout 2 "),
     )
 
