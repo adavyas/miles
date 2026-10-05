@@ -108,12 +108,13 @@ def _prepare_download(args: ScriptArgs):
 
 
 def _download_dataset(args: ScriptArgs):
+    backend = args.create_backend()
     match args.task:
         case "dapo_aime":
-            U.hf_download_dataset("zhuzilin/dapo-math-17k", data_dir=args.data_dir)
-            U.hf_download_dataset("zhuzilin/aime-2024", data_dir=args.data_dir)
+            backend.hf_download_dataset("zhuzilin/dapo-math-17k", data_dir=args.data_dir)
+            backend.hf_download_dataset("zhuzilin/aime-2024", data_dir=args.data_dir)
         case "gsm8k":
-            U.hf_download_dataset("zhuzilin/gsm8k", data_dir=args.data_dir)
+            backend.hf_download_dataset("zhuzilin/gsm8k", data_dir=args.data_dir)
 
 
 def _parallel_args(args: ScriptArgs) -> str:
