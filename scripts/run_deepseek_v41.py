@@ -84,6 +84,7 @@ class ScriptArgs(U.ExecuteTrainConfig):
             self.ep_size = self.actor_num_nodes * self.num_gpus_per_node // self.pp_size
         if self.colocate:
             self.rollout_num_gpus = self.num_nodes * self.num_gpus_per_node
+            self.sglang_engram_host_table = True
         else:
             self.rollout_num_gpus = self.rollout_num_nodes * self.num_gpus_per_node
         if self.rollout_max_response_len is None:
