@@ -1,18 +1,19 @@
 """Two-GPU offline DiffusionGemma SFT, including a real interrupted restart."""
 
-import ast
 import json
 import math
 import os
-import re
 import shlex
 import tempfile
 from pathlib import Path
 
 import torch
 from safetensors.torch import load_file
+from scripts.run_diffusiongemma_26b_a4b_fsdp_sft import ScriptArgs
+from scripts.run_diffusiongemma_26b_a4b_fsdp_sft import execute as execute_recipe
 from tests.ci.ci_register import register_cuda_ci
 from tokenizers import Tokenizer, models, pre_tokenizers
+from torch.utils._pytree import tree_flatten
 from transformers import DiffusionGemmaConfig, DiffusionGemmaTextConfig, Gemma4VisionConfig, PreTrainedTokenizerFast
 from transformers.models.diffusion_gemma.modeling_diffusion_gemma import DiffusionGemmaForBlockDiffusion
 
@@ -105,72 +106,28 @@ def create_fixture(root: Path) -> tuple[Path, Path]:
     return checkpoint, dataset
 
 
-def train_arguments(root: Path, *, save: Path, load: Path | None = None, stop_after: int | None = None) -> str:
-    argv = [
-        "--train-backend",
-        "fsdp",
-        "--hf-checkpoint",
-        str(root / "hf_checkpoint"),
-        "--prompt-data",
-        str(root / "conversations.jsonl"),
-        "--input-key",
-        "messages",
-        "--rollout-function-path",
-        "miles.rollout.diffusion_gemma_sft.generate_rollout",
-        "--loss-type",
-        "sft_loss",
-        "--debug-train-only",
-        "--disable-compute-advantages-and-returns",
-        "--attn-implementation",
-        "sdpa",
-        "--kernel-backend",
-        "native",
-        "--qkv-format",
-        "bshd",
-        "--actor-num-nodes",
-        "1",
-        "--actor-num-gpus-per-node",
-        str(NUM_GPUS),
-        "--num-gpus-per-node",
-        str(NUM_GPUS),
-        "--num-rollout",
-        str(NUM_ROLLOUTS),
-        "--rollout-batch-size",
-        str(BATCH_SIZE),
-        "--n-samples-per-prompt",
-        "1",
-        "--global-batch-size",
-        str(BATCH_SIZE),
-        "--micro-batch-size",
-        "1",
-        "--optimizer",
-        "adam",
-        "--lr",
-        "0.001",
-        "--min-lr",
-        "0.0001",
-        "--lr-decay-style",
-        "linear",
-        "--lr-decay-iters",
-        str(NUM_ROLLOUTS),
-        "--lr-warmup-iters",
-        "1",
-        "--weight-decay",
-        "0.01",
-        "--bf16",
-        "--gradient-checkpointing",
-        "--seed",
-        "42",
-        "--save",
-        str(save),
-        "--save-interval",
-        "1",
-    ]
-    if load is not None:
-        argv += ["--load", str(load)]
+def _recipe_args(root: Path, *, output_dir: Path, stop_after: int | None = None) -> ScriptArgs:
+    extra_args = (
+        f"--num-rollout {NUM_ROLLOUTS} --min-lr 0.0001 --lr-decay-style linear "
+        f"--lr-decay-iters {NUM_ROLLOUTS} --lr-warmup-iters 1 --bf16 --seed 42 "
+        f"--save-debug-event-data {shlex.quote(str(output_dir / 'events'))}"
+    )
     if stop_after is not None:
-        argv += ["--debug-exit-after-rollout", str(stop_after)]
-    return shlex.join(argv)
+        extra_args += f" --debug-exit-after-rollout {stop_after}"
+    return ScriptArgs(
+        hf_checkpoint=str(root / "hf_checkpoint"),
+        data_path=str(root / "conversations.jsonl"),
+        output_dir=str(output_dir),
+        num_nodes=1,
+        num_gpus_per_node=NUM_GPUS,
+        rollout_batch_size=BATCH_SIZE,
+        global_batch_size=BATCH_SIZE,
+        micro_batch_size=1,
+        lr=0.001,
+        save_interval=1,
+        extra_args=extra_args,
+        extra_env_vars="HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false",
+    )
 
 
 def read_dcp(directory: Path, destination: Path) -> dict:
@@ -203,36 +160,15 @@ def load_initial_model(checkpoint: Path):
 
 
 def assert_state_close(expected, actual, *, path: str = "state") -> None:
-    if isinstance(expected, torch.Tensor):
-        assert torch.isfinite(actual).all(), path
-        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6, msg=path)
-    elif isinstance(expected, dict):
-        assert expected.keys() == actual.keys(), path
-        for key in expected:
-            assert_state_close(expected[key], actual[key], path=f"{path}.{key}")
-    elif isinstance(expected, (list, tuple)):
-        assert len(expected) == len(actual), path
-        for index, (left, right) in enumerate(zip(expected, actual, strict=True)):
-            assert_state_close(left, right, path=f"{path}.{index}")
-    else:
-        assert expected == actual, (path, expected, actual)
-
-
-def read_metrics(log_path: Path, *, expected_steps: list[int]) -> list[dict]:
-    records = []
-    steps = []
-    for line in log_path.read_text().splitlines():
-        match = re.search(r"\bstep (\d+): (\{.*\})", line)
-        if not match:
-            continue
-        metrics = ast.literal_eval(match.group(2))
-        for key in ("train/loss", "train/diffusion_loss", "train/encoder_ar_loss", "train/grad_norm"):
-            assert math.isfinite(metrics[key]), (log_path, key, metrics)
-            assert metrics[key] > 0, (log_path, key, metrics)
-        steps.append(int(match.group(1)))
-        records.append(metrics)
-    assert steps == expected_steps, (log_path, steps, expected_steps)
-    return records
+    expected_values, expected_spec = tree_flatten(expected)
+    actual_values, actual_spec = tree_flatten(actual)
+    assert expected_spec == actual_spec, path
+    for expected_value, actual_value in zip(expected_values, actual_values, strict=True):
+        if isinstance(expected_value, torch.Tensor):
+            assert torch.isfinite(actual_value).all(), path
+            torch.testing.assert_close(actual_value, expected_value, rtol=1e-5, atol=1e-6, msg=path)
+        else:
+            assert expected_value == actual_value, path
 
 
 def verify_checkpoint(root: Path, save: Path, *, steps: int) -> dict:
@@ -252,9 +188,9 @@ def verify_checkpoint(root: Path, save: Path, *, steps: int) -> dict:
     state = {
         "metadata": metadata,
         "dataset": dataset,
-        "model": read_dcp(checkpoint / "model", root / f"{save.name}-{steps}-model.pt")["model_state"]["model"],
-        "optimizer": read_dcp(checkpoint / "optimizer", root / f"{save.name}-{steps}-optimizer.pt"),
-        "scheduler": read_dcp(checkpoint / "lr_scheduler", root / f"{save.name}-{steps}-scheduler.pt"),
+        "model": read_dcp(checkpoint / "model", root / f"{save.parent.name}-{steps}-model.pt")["model_state"]["model"],
+        "optimizer": read_dcp(checkpoint / "optimizer", root / f"{save.parent.name}-{steps}-optimizer.pt"),
+        "scheduler": read_dcp(checkpoint / "lr_scheduler", root / f"{save.parent.name}-{steps}-scheduler.pt"),
     }
 
     optimizer = state["optimizer"]["optim_state"]["optim"]["state"]
@@ -268,39 +204,32 @@ def verify_checkpoint(root: Path, save: Path, *, steps: int) -> dict:
 
 
 def execute(root: Path) -> dict:
-    # Ray's launcher dependencies are unnecessary for the standalone CPU fixtures.
-    from miles.utils.external_utils import command_utils
+    # The shared metric reader imports the GPU image's SGLang/Megatron runtime.
+    from miles.utils.test_utils.comparisons.metrics import read_metric_events
 
-    backend = command_utils.default_config().create_backend()
     checkpoint, _ = create_fixture(root)
     initial_model = load_initial_model(checkpoint)
     initial = initial_model.state_dict()
     parameter_names = set(dict(initial_model.named_parameters()))
     full, split = root / "uninterrupted", root / "resumed"
-    jobs = [("uninterrupted", full, None, None), ("interrupted", split, None, 2), ("resumed", split, split, None)]
+    jobs = [("uninterrupted", full, None), ("interrupted", split, 2), ("resumed", split, None)]
     metrics = {}
     interrupted_state = None
-    for name, save, load, stop_after in jobs:
-        log = root / f"{name}.log"
-        backend.execute_train(
-            train_args=train_arguments(root, save=save, load=load, stop_after=stop_after)
-            + f" > {shlex.quote(str(log))} 2>&1",
-            num_gpus_per_node=NUM_GPUS,
-            megatron_model_type=None,
-            job_lifetime="launcher",
-            extra_env_vars={"HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false"},
-        )
-        metrics[name] = read_metrics(
-            log,
-            expected_steps=[0, 1, 2, 3] if name == "uninterrupted" else [0, 1] if name == "interrupted" else [2, 3],
-        )
+    for name, output_dir, stop_after in jobs:
+        execute_recipe(_recipe_args(root, output_dir=output_dir, stop_after=stop_after))
+        # FSDP logs its optimizer step in the payload; audit rollout_id is unset.
+        records = [
+            event.metrics for event in read_metric_events(output_dir / "events") if "train/loss" in event.metrics
+        ]
+        assert [record["train/step"] for record in records] == list(range(stop_after or NUM_ROLLOUTS)), name
+        for record in records:
+            for key in ("train/loss", "train/diffusion_loss", "train/encoder_ar_loss", "train/grad_norm"):
+                assert math.isfinite(record[key]) and record[key] > 0, (name, key, record)
+        metrics[name] = records
         if name == "interrupted":
-            interrupted_state = verify_checkpoint(root, split, steps=2)
-    resume_log = (root / "resumed.log").read_text()
-    for message in ("Loaded model from", "Loaded optimizer from", "Loaded LR scheduler from", "load metadata from"):
-        assert message in resume_log, message
-    baseline = verify_checkpoint(root, full, steps=NUM_ROLLOUTS)
-    resumed = verify_checkpoint(root, split, steps=NUM_ROLLOUTS)
+            interrupted_state = verify_checkpoint(root, split / "checkpoints", steps=2)
+    baseline = verify_checkpoint(root, full / "checkpoints", steps=NUM_ROLLOUTS)
+    resumed = verify_checkpoint(root, split / "checkpoints", steps=NUM_ROLLOUTS)
     for section in ("model", "optimizer", "scheduler", "dataset"):
         assert_state_close(baseline[section], resumed[section], path=section)
     router_names = [name for name in initial if ".router." in name]

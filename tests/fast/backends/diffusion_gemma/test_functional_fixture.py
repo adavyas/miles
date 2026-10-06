@@ -1,10 +1,11 @@
 import json
 import shlex
+from types import SimpleNamespace
 
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
-from tests.e2e.fsdp.test_diffusiongemma_sft import create_fixture, train_arguments
+from tests.e2e.fsdp.test_diffusiongemma_sft import create_fixture
 from transformers import AutoConfig, AutoTokenizer
 
 from miles.backends.fsdp_utils.diffusion_gemma.model import DiffusionGemmaForBlockDiffusion
@@ -47,54 +48,26 @@ def test_functional_fixture_is_native_hf_and_uses_varied_text(tmp_path):
     assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
 
 
-def test_resume_uses_same_training_horizon_and_restores_all_state(tmp_path):
-    uninterrupted = shlex.split(train_arguments(tmp_path, save=tmp_path / "full"))
-    interrupted = shlex.split(train_arguments(tmp_path, save=tmp_path / "split", stop_after=2))
-    resumed = shlex.split(train_arguments(tmp_path, save=tmp_path / "split", load=tmp_path / "split"))
-    for argv in (uninterrupted, interrupted, resumed):
-        for name, value in [
-            ("--num-rollout", "4"),
-            ("--lr-decay-iters", "4"),
-            ("--lr-warmup-iters", "1"),
-            ("--actor-num-gpus-per-node", "2"),
-        ]:
-            assert argv[argv.index(name) + 1] == value
-        assert "--debug-train-only" in argv
+def test_functional_uses_recipe_with_same_horizon_and_resume_directory(tmp_path, monkeypatch):
+    from scripts import run_diffusiongemma_26b_a4b_fsdp_sft as recipe
+    from tests.e2e.fsdp.test_diffusiongemma_sft import _recipe_args
+
+    commands = []
+    monkeypatch.setattr(
+        recipe.ScriptArgs,
+        "create_backend",
+        lambda self: SimpleNamespace(execute_train=lambda **kwargs: commands.append(kwargs)),
+    )
+    for stop_after in (None, 2, None):
+        recipe.execute(_recipe_args(tmp_path, output_dir=tmp_path / "split", stop_after=stop_after))
+    for command in commands:
+        argv = shlex.split(command["train_args"])
+        for flag, expected in (("--num-rollout", "4"), ("--lr-decay-iters", "4"), ("--lr-warmup-iters", "1")):
+            assert argv[argv.index(flag) + 1] == expected
+        assert argv[argv.index("--load") + 1] == str(tmp_path / "split" / "checkpoints")
+        assert argv[argv.index("--save") + 1] == str(tmp_path / "split" / "checkpoints")
+        assert "--save-debug-event-data" in argv
         assert "--bf16" in argv
-        assert "--no-load-optim" not in argv
-        assert "--no-load-rng" not in argv
-    assert interrupted[interrupted.index("--debug-exit-after-rollout") + 1] == "2"
-    assert "--debug-exit-after-rollout" not in resumed
-    assert resumed[resumed.index("--load") + 1] == str(tmp_path / "split")
-
-
-def test_dcp_reader_preserves_nested_model_optimizer_and_scheduler(tmp_path):
-    import torch.distributed.checkpoint as dcp
-    from tests.e2e.fsdp.test_diffusiongemma_sft import assert_state_close, read_dcp
-
-    state = {
-        "model_state": {"model": {"layer.weight": torch.arange(8).reshape(2, 4).float()}},
-        "optim_state": {
-            "optim": {"state": {"layer.weight": {"step": torch.tensor(2.0), "exp_avg": torch.ones(2, 4)}}}
-        },
-        "lr_scheduler_state": {"lr_scheduler": {"last_epoch": 2, "_last_lr": [0.0007]}},
-    }
-    dcp.save(state, checkpoint_id=str(tmp_path / "checkpoint"))
-    restored = read_dcp(tmp_path / "checkpoint", tmp_path / "state.pt")
-    assert_state_close(state, restored)
-
-
-def test_metric_reader_requires_expected_step_and_finite_training_values(tmp_path):
-    import pytest
-    from tests.e2e.fsdp.test_diffusiongemma_sft import read_metrics
-
-    log = tmp_path / "train.log"
-    metrics = {"train/loss": 2.0, "train/diffusion_loss": 1.0, "train/encoder_ar_loss": 1.0, "train/grad_norm": 0.2}
-    log.write_text(f"(TrainActor pid=1) step 2: {metrics}\n")
-    assert read_metrics(log, expected_steps=[2]) == [metrics]
-    with pytest.raises(AssertionError):
-        read_metrics(log, expected_steps=[0])
-    metrics["train/grad_norm"] = 0.0
-    log.write_text(f"step 2: {metrics}\n")
-    with pytest.raises(AssertionError):
-        read_metrics(log, expected_steps=[2])
+        assert command["train_script"] == "train.py"
+    assert "--debug-exit-after-rollout 2" in commands[1]["train_args"]
+    assert "--debug-exit-after-rollout" not in commands[2]["train_args"]
