@@ -8,7 +8,7 @@ from tests.ci.metric_history import register_ci_gate
 
 register_cuda_ci(
     est_time=1900,
-    suite="stage-c-4-gpu-h200",
+    suite="stage-c-8-gpu-h200",
     labels=["megatron", "model-scripts"],
     hardware=["hopper", "blackwell"],
 )
@@ -26,7 +26,7 @@ def _args() -> ScriptArgs:
         task="gsm8k",
         enable_eval=False,
         num_nodes=1,
-        num_gpus_per_node=4,
+        num_gpus_per_node=8,
         hardware="H200",
         load_from_hf=True,
         skip_saving=True,
