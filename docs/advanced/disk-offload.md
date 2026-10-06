@@ -66,7 +66,8 @@ are tiny, and unlike the bf16 path their optimizer shards alias the model params
 The fp32 gradients the step reads are bounded the same way: instead of Megatron copying every
 reduced bf16 gradient into an fp32 `.grad` up front (4 more bytes per local parameter), each
 bucket's gradients are converted, times the clip coefficient, right before its Adam step and
-dropped after it. The grad norm reads the bf16 shards directly, and the result is the same.
+dropped after it. The grad norm reads the reduced gradients in the DDP grad buffer directly and
+matches Megatron's up to float summation order.
 
 For the Adam/DistributedOptimizer path, streaming also bounds initialization: Megatron releases
 each fp32 main shard's storage after creating its tensor handle, then Miles fills one existing
@@ -75,8 +76,9 @@ initialization HBM is the largest individual shard during construction and one m
 afterward (normally at most about 200M fp32 elements, except for an oversized entry). Each
 initialized range is synchronized and evicted from page cache before continuing.
 
-`fp32` storage is bit-identical to keeping the state on GPU, so turning this on does not
-change results — it trades step time for memory. The step is I/O bound and the moments
+With `fp32` storage the state round-trips bit for bit and only the grad norm's summation
+order differs from keeping it on GPU, so turning this on changes results by rounding at
+most — it trades step time for memory. The step is I/O bound and the moments
 tolerate less precision than the master copy, so they can be stored narrower:
 
 ```bash
