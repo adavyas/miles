@@ -11,7 +11,6 @@ def validate_training_args(args) -> None:
     requirements = {
         "loss_type": "sft_loss",
         "debug_train_only": True,
-        "disable_compute_advantages_and_returns": True,
         "qkv_format": "bshd",
         "attn_implementation": "sdpa",
         "kernel_backend": "native",
@@ -22,6 +21,8 @@ def validate_training_args(args) -> None:
     for name, expected in requirements.items():
         if getattr(args, name, None) != expected:
             raise ValueError(f"DiffusionGemma offline SFT requires --{name.replace('_', '-')} {expected}")
+    if getattr(args, "compute_advantages_and_returns", None) is not False:
+        raise ValueError("DiffusionGemma offline SFT requires --disable-compute-advantages-and-returns")
     unsupported = (
         "use_dynamic_batch_size",
         "use_dynamic_global_batch_size",

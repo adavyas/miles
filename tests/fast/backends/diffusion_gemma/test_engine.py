@@ -94,7 +94,7 @@ def valid_args():
         rollout_function_path="miles.rollout.diffusion_gemma_sft.generate_rollout",
         n_samples_per_prompt=1,
         apply_chat_template=False,
-        disable_compute_advantages_and_returns=True,
+        compute_advantages_and_returns=False,
         qkv_format="bshd",
         attn_implementation="sdpa",
         kernel_backend="native",
@@ -118,6 +118,8 @@ def test_valid_offline_configuration():
     [
         ("loss_type", "policy_loss"),
         ("debug_train_only", False),
+        ("compute_advantages_and_returns", True),
+        ("compute_advantages_and_returns", None),
         ("attn_implementation", "flash_attention_2"),
         ("lora_rank", 4),
         ("use_dynamic_batch_size", True),
