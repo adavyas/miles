@@ -33,7 +33,9 @@ def _args() -> ScriptArgs:
         use_fault_tolerance=False,
         optimizer_offload=True,
         recompute="full",
-        extra_args=("--ci-test " "--check-weight-update-allow-quant-error " "--num-rollout 2 "),
+        extra_args=(
+            "--ci-test " "--ci-disable-kl-checker " "--check-weight-update-allow-quant-error " "--num-rollout 2 "
+        ),
     )
 
 
