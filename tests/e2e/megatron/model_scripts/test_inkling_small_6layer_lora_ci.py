@@ -1,24 +1,25 @@
 import os
 
-if os.getenv("MILES_HARDWARE_PLATFORM") == "rocm":
-    from scripts.amd.run_inkling import _MODEL_REGISTRY, ScriptArgs, _train
-else:
-    from scripts.run_inkling import _MODEL_REGISTRY, ScriptArgs, _train
-
+from scripts.run_inkling import _MODEL_REGISTRY, ScriptArgs, _train
 from tests.ci.ci_register import register_cuda_ci, register_rocm_ci
 from tests.ci.metric_history import register_ci_gate
 
 
+# Smoke test for scripts/run_inkling.py --train-mode lora on the 6-layer slice:
+# shared-outer grouped-expert LoRA served through SGLang's virtual-experts path, one
+# 4-GPU engine, adapter sync verified by checksum. Functionality, not accuracy.
+
+
 register_cuda_ci(
-    est_time=700,
+    est_time=600,
     suite="stage-c-4-gpu-h200",
-    labels=["megatron", "model-scripts"],
+    labels=["megatron", "model-scripts", "lora"],
     hardware=["hopper", "blackwell"],
 )
 register_rocm_ci(
-    est_time=1800,
-    suite="stage-c-4-gpu-mi350",
-    labels=["megatron", "model-scripts", "amd"],
+    est_time=500,
+    suite="nightly-stage-c-4-gpu-mi350",
+    labels=["megatron", "model-scripts", "lora"],
 )
 
 register_ci_gate(metric_key="train/grad_norm")
@@ -27,13 +28,13 @@ register_ci_gate(metric_key="train/train_rollout_logprob_abs_diff")
 register_ci_gate(metric_key="train/train_rollout_kl")
 register_ci_gate(metric_key="rollout/raw_reward")
 
-_MODEL_ORG = "CharyZeng"
+_MODEL_ORG = "pb09204048"
 
 
 def _args() -> ScriptArgs:
     return ScriptArgs.from_env(
-        model_name="Inkling-Small-4layer",
-        train_mode="full",
+        model_name="Inkling-Small-6layer",
+        train_mode="lora",
         task="dapo_math",
         num_nodes=1,
         num_gpus_per_node=4,
@@ -44,10 +45,12 @@ def _args() -> ScriptArgs:
         extra_args=(
             "--ci-test "
             "--ci-disable-kl-checker "
-            "--check-weight-update-skip-list visual. audio. "
+            # frozen towers and the engine-derived adapter buffers never match the snapshot
+            "--check-weight-update-skip-list visual. audio. ._w1_delta ._a_cat "
             "--ci-disable-logprobs-checker "
-            "--offload-train-target cpu "
-        ),
+            "--check-lora-weight-equal "
+        )
+        + ("--sglang-attention-backend triton " if os.getenv("MILES_HARDWARE_PLATFORM") == "rocm" else ""),
     )
 
 
