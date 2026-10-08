@@ -11,7 +11,7 @@ from tests.ci.metric_history import register_ci_gate
 
 
 register_cuda_ci(
-    est_time=600,
+    est_time=1100,
     suite="stage-c-4-gpu-h200",
     labels=["megatron", "model-scripts", "lora"],
     hardware=["hopper", "blackwell"],
@@ -40,6 +40,9 @@ def _args() -> ScriptArgs:
         num_gpus_per_node=4,
         rollout_num_gpus_per_engine=4,
         num_rollout=2,
+        rollout_batch_size=4,
+        n_samples_per_prompt=4,
+        global_batch_size=16,
         rollout_max_response_len=512,
         sglang_context_length=1024,
         extra_args=(
